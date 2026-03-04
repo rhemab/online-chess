@@ -2,7 +2,7 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::{Router, routing::get};
-use chess::{ChessMove, File, Game, Rank, Square};
+use chess::{ChessMove, Color, File, Game, Rank, Square};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -15,8 +15,7 @@ pub struct AppState {
     black: Option<Uuid>,
     players_waiting: Vec<Uuid>,
     game: Game,
-    sender: tokio::sync::broadcast::Sender<String>,
-    receiver: broadcast::Receiver<String>,
+    sender: tokio::sync::broadcast::Sender<Broadcast>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -26,9 +25,16 @@ struct PlayerMove {
     piece: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Broadcast {
+    position: String,
+    turn: String,
+    player_color: String,
+}
+
 #[tokio::main]
 async fn main() {
-    let (tx, rx) = broadcast::channel(16);
+    let (tx, _) = broadcast::channel(16);
 
     let app_state = AppState {
         white: None,
@@ -36,7 +42,6 @@ async fn main() {
         players_waiting: vec![],
         game: Game::new(),
         sender: tx,
-        receiver: rx,
     };
 
     let app = Router::new()
@@ -59,6 +64,14 @@ async fn websocket_handler(
 
 async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
     let player_color;
+
+    // create initial broadcast for new connected client
+    let mut broadcast = Broadcast {
+        position: String::new(),
+        turn: String::new(),
+        player_color: String::new(),
+    };
+
     // generate new id for new client
     let new_id = Uuid::new_v4();
     let mut rx;
@@ -78,21 +91,31 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
             app_state.players_waiting.push(new_id);
             player_color = "none";
         }
+
+        broadcast.position = app_state.game.current_position().to_string();
+        broadcast.turn = color_into_string(app_state.game.side_to_move());
+        broadcast.player_color = player_color.to_string();
     }
 
-    // send player color to client
-    let msg = Message::Text(player_color.into());
-    if let Err(err) = socket.send(msg).await {
-        dbg!(err);
+    // send initial broadcast to new client
+    if let Ok(json_msg) = serde_json::to_string(&broadcast) {
+        if let Err(err) = socket.send(json_msg.into()).await {
+            dbg!(err);
+        }
     }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
+    // broadcast messages to all connected clients
     tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            let msg = Message::Text(msg.into());
-            if let Err(err) = ws_tx.send(msg).await {
-                dbg!(err);
+        while let Ok(mut msg) = rx.recv().await {
+            // after receiving a msg on the channel
+            // serialize and send the msg to clients
+            msg.player_color = player_color.to_string();
+            if let Ok(json_msg) = serde_json::to_string(&msg) {
+                if let Err(err) = ws_tx.send(json_msg.into()).await {
+                    dbg!(err);
+                }
             }
         }
     });
@@ -109,12 +132,18 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
                     let source = square_from_str(&player_move.source);
                     let target = square_from_str(&player_move.target);
 
+                    // if we have a source and a target, make the move
                     if let Some(source) = source
                         && let Some(target) = target
                     {
                         let new_move = ChessMove::new(source, target, None);
                         if app_state.game.make_move(new_move) {
-                            let msg = app_state.game.current_position().to_string();
+                            // if move is legal, broadcast move
+                            let msg = Broadcast {
+                                position: app_state.game.current_position().to_string(),
+                                turn: color_into_string(app_state.game.side_to_move()),
+                                player_color: player_color.into(),
+                            };
                             if let Err(err) = app_state.sender.send(msg) {
                                 dbg!(err);
                             }
@@ -124,6 +153,13 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
             }
             _ => {}
         }
+    }
+}
+
+fn color_into_string(color: Color) -> String {
+    match color {
+        Color::White => "white".into(),
+        Color::Black => "black".into(),
     }
 }
 
