@@ -3,18 +3,20 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::{Router, routing::get};
 use chess::{ChessMove, File, Game, Rank, Square};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
 pub struct AppState {
     white: Option<Uuid>,
     black: Option<Uuid>,
     players_waiting: Vec<Uuid>,
     game: Game,
+    sender: tokio::sync::broadcast::Sender<String>,
+    receiver: broadcast::Receiver<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -26,11 +28,15 @@ struct PlayerMove {
 
 #[tokio::main]
 async fn main() {
+    let (tx, rx) = broadcast::channel(16);
+
     let app_state = AppState {
         white: None,
         black: None,
         players_waiting: vec![],
         game: Game::new(),
+        sender: tx,
+        receiver: rx,
     };
 
     let app = Router::new()
@@ -55,10 +61,12 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
     let player_color;
     // generate new id for new client
     let new_id = Uuid::new_v4();
+    let mut rx;
 
     // set player color
     {
         let mut app_state = app_state.lock().await;
+        rx = app_state.sender.subscribe();
 
         if app_state.white.is_none() {
             app_state.white = Some(new_id);
@@ -78,8 +86,19 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
         dbg!(err);
     }
 
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    tokio::spawn(async move {
+        while let Ok(msg) = rx.recv().await {
+            let msg = Message::Text(msg.into());
+            if let Err(err) = ws_tx.send(msg).await {
+                dbg!(err);
+            }
+        }
+    });
+
     // recieve messages
-    while let Some(Ok(msg)) = socket.recv().await {
+    while let Some(Ok(msg)) = ws_rx.next().await {
         match msg {
             Message::Text(bytes) => {
                 if let Ok(player_move) = serde_json::from_str::<PlayerMove>(&bytes) {
@@ -95,9 +114,8 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
                     {
                         let new_move = ChessMove::new(source, target, None);
                         if app_state.game.make_move(new_move) {
-                            let msg =
-                                Message::Text(app_state.game.current_position().to_string().into());
-                            if let Err(err) = socket.send(msg).await {
+                            let msg = app_state.game.current_position().to_string();
+                            if let Err(err) = app_state.sender.send(msg) {
                                 dbg!(err);
                             }
                         }
