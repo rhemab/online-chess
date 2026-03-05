@@ -24,11 +24,24 @@
             .invisible {
                 display: none;
             }
+            .playerName {
+                color: white;
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+            }
         </style>
     </head>
 
     <body>
+        <div class="playerName">
+            <p id="topPlayer">Top Player</p>
+        </div>
         <div id="board1"></div>
+        <div class="playerName">
+            <p id="bottomPlayer">Bottom Player</p>
+            <button id="editUsername" class="invisible">Edit</button>
+        </div>
         <div>
             <p id="turn" style="color: white"></p>
             <button id="resign">Resign</button>

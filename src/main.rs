@@ -7,18 +7,21 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, MutexGuard, broadcast};
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 pub struct AppState {
     white: Option<Uuid>,
     black: Option<Uuid>,
+    white_name: String,
+    black_name: String,
     players_waiting: VecDeque<Uuid>,
     game: Game,
     sender: tokio::sync::broadcast::Sender<Broadcast>,
 }
 
+// receiving msg
 #[derive(Serialize, Deserialize, Debug)]
 struct PlayerMove {
     source: String,
@@ -26,9 +29,17 @@ struct PlayerMove {
     piece: String,
 }
 
+// receiving msg
+#[derive(Serialize, Deserialize, Debug)]
+struct PlayerName {
+    player_color: String,
+    player_name: String,
+}
+
+// receiving msg
 #[derive(Serialize, Deserialize, Debug)]
 struct PlayerResign {
-    player_color: String,
+    player_resign: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -37,6 +48,8 @@ struct Broadcast {
     turn: String,
     player_color: String,
     game_result: String,
+    white_name: String,
+    black_name: String,
 }
 
 #[tokio::main]
@@ -46,6 +59,8 @@ async fn main() {
     let app_state = AppState {
         white: None,
         black: None,
+        white_name: String::from("White Player"),
+        black_name: String::from("Black Player"),
         players_waiting: VecDeque::new(),
         game: Game::new(),
         sender: tx,
@@ -98,6 +113,8 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
         broadcast.position = app_state.game.current_position().to_string();
         broadcast.turn = color_into_string(app_state.game.side_to_move());
         broadcast.player_color = player_color.to_string();
+        broadcast.white_name = app_state.white_name.clone();
+        broadcast.black_name = app_state.black_name.clone();
         if let Some(result) = app_state.game.result() {
             broadcast.game_result = result_to_string(result);
         }
@@ -154,31 +171,22 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
                             app_state.game.make_move(new_move);
                         }
                     }
-
-                    let mut broadcast = Broadcast::default();
-                    broadcast.position = app_state.game.current_position().to_string();
-                    broadcast.turn = color_into_string(app_state.game.side_to_move());
-                    if let Some(result) = app_state.game.result() {
-                        broadcast.game_result = result_to_string(result);
-                    }
-                    if let Err(err) = app_state.sender.send(broadcast) {
-                        dbg!(err);
-                    }
+                    send_broadcast(app_state);
                 } else if let Ok(player_resign) = serde_json::from_str::<PlayerResign>(&bytes) {
                     let mut app_state = app_state.lock().await;
-                    if let Some(color) = string_into_color(&player_resign.player_color) {
+                    if let Some(color) = string_into_color(&player_resign.player_resign) {
                         app_state.game.resign(color);
-
-                        let mut broadcast = Broadcast::default();
-                        broadcast.position = app_state.game.current_position().to_string();
-                        broadcast.turn = color_into_string(app_state.game.side_to_move());
-                        if let Some(result) = app_state.game.result() {
-                            broadcast.game_result = result_to_string(result);
-                        }
-                        if let Err(err) = app_state.sender.send(broadcast) {
-                            dbg!(err);
-                        }
+                        send_broadcast(app_state);
                     }
+                } else if let Ok(player_name) = serde_json::from_str::<PlayerName>(&bytes) {
+                    // broadcast player name
+                    let mut app_state = app_state.lock().await;
+                    match player_name.player_color.as_str() {
+                        "white" => app_state.white_name = player_name.player_name,
+                        "black" => app_state.black_name = player_name.player_name,
+                        _ => {}
+                    }
+                    send_broadcast(app_state);
                 }
             }
             _ => {}
@@ -198,9 +206,15 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
     }
 
     // send broadcast to so that clients are updated
+    send_broadcast(app_state);
+}
+
+fn send_broadcast(app_state: MutexGuard<'_, AppState>) {
     let mut broadcast = Broadcast::default();
     broadcast.position = app_state.game.current_position().to_string();
     broadcast.turn = color_into_string(app_state.game.side_to_move());
+    broadcast.white_name = app_state.white_name.clone();
+    broadcast.black_name = app_state.black_name.clone();
     if let Some(result) = app_state.game.result() {
         broadcast.game_result = result_to_string(result);
     }
