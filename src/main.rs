@@ -98,11 +98,9 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
         broadcast.position = app_state.game.current_position().to_string();
         broadcast.turn = color_into_string(app_state.game.side_to_move());
         broadcast.player_color = player_color.to_string();
-
-        dbg!(app_state.players_waiting.len());
-        dbg!(app_state.white);
-        dbg!(app_state.black);
-        dbg!(player_id);
+        if let Some(result) = app_state.game.result() {
+            broadcast.game_result = result_to_string(result);
+        }
     }
 
     // send initial broadcast to new client
@@ -209,11 +207,6 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
     if let Err(err) = app_state.sender.send(broadcast) {
         dbg!(err);
     }
-
-    dbg!(app_state.players_waiting.len());
-    dbg!(app_state.white);
-    dbg!(app_state.black);
-    dbg!(player_id);
 }
 
 fn result_to_string(result: GameResult) -> String {

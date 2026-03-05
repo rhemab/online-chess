@@ -1,5 +1,6 @@
 const turn = document.getElementById("turn");
 const resign = document.getElementById("resign");
+const joinNewGame = document.getElementById("joinNewGame");
 
 const socketUrl = `ws://${window.location.host}/ws`;
 const socket = new WebSocket(socketUrl);
@@ -69,6 +70,8 @@ socket.addEventListener("message", (event) => {
     // check for game over
     if (data.game_result.length > 0) {
         turn.innerHTML = data.game_result;
+        joinNewGame.classList.remove("invisible");
+        socket.close();
     }
 });
 
@@ -85,4 +88,8 @@ resign.addEventListener("click", (event) => {
         let jsonMsg = JSON.stringify(playerResign);
         socket.send(jsonMsg);
     }
+});
+
+joinNewGame.addEventListener("click", (event) => {
+    window.location.reload();
 });
