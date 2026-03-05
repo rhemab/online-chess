@@ -6,10 +6,30 @@
         <title>Chess</title>
         <link rel="icon" href="favicon.svg" type="image/x-icon" />
         <link rel="stylesheet" href="css/chessboard-1.0.0.min.css" />
+        <style>
+            body {
+                background: #4c525f;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+            }
+            #board1 {
+                width: 70vw;
+                max-width: 700px;
+            }
+            .invisible {
+                display: none;
+            }
+        </style>
     </head>
 
-    <body style="background: #4c525f">
-        <div id="board1" style="width: 400px"></div>
+    <body>
+        <div id="board1"></div>
+        <div>
+            <p id="turn" style="color: white"></p>
+            <button id="resign">Resign</button>
+        </div>
         <script src="https://code.jquery.com/jquery-4.0.0.min.js" integrity="sha256-OaVG6prZf4v69dPg6PhVattBXkcOWQB62pdZ3ORyrao=" crossorigin="anonymous"></script>
         <script src="js/chessboard-1.0.0.min.js"></script>
         <script src="js/script.js"></script>

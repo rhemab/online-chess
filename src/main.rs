@@ -2,9 +2,10 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::{Router, routing::get};
-use chess::{ChessMove, Color, File, Game, Rank, Square};
+use chess::{ChessMove, Color, File, Game, GameResult, Rank, Square};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use tower_http::services::ServeDir;
@@ -13,7 +14,7 @@ use uuid::Uuid;
 pub struct AppState {
     white: Option<Uuid>,
     black: Option<Uuid>,
-    players_waiting: Vec<Uuid>,
+    players_waiting: VecDeque<Uuid>,
     game: Game,
     sender: tokio::sync::broadcast::Sender<Broadcast>,
 }
@@ -25,11 +26,17 @@ struct PlayerMove {
     piece: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug)]
+struct PlayerResign {
+    player_color: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 struct Broadcast {
     position: String,
     turn: String,
     player_color: String,
+    game_result: String,
 }
 
 #[tokio::main]
@@ -39,7 +46,7 @@ async fn main() {
     let app_state = AppState {
         white: None,
         black: None,
-        players_waiting: vec![],
+        players_waiting: VecDeque::new(),
         game: Game::new(),
         sender: tx,
     };
@@ -63,17 +70,13 @@ async fn websocket_handler(
 }
 
 async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
-    let player_color;
+    let mut player_color;
 
     // create initial broadcast for new connected client
-    let mut broadcast = Broadcast {
-        position: String::new(),
-        turn: String::new(),
-        player_color: String::new(),
-    };
+    let mut broadcast = Broadcast::default();
 
     // generate new id for new client
-    let new_id = Uuid::new_v4();
+    let player_id = Uuid::new_v4();
     let mut rx;
 
     // set player color
@@ -82,19 +85,24 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
         rx = app_state.sender.subscribe();
 
         if app_state.white.is_none() {
-            app_state.white = Some(new_id);
+            app_state.white = Some(player_id);
             player_color = "white";
         } else if app_state.black.is_none() {
-            app_state.black = Some(new_id);
+            app_state.black = Some(player_id);
             player_color = "black";
         } else {
-            app_state.players_waiting.push(new_id);
+            app_state.players_waiting.push_back(player_id);
             player_color = "none";
         }
 
         broadcast.position = app_state.game.current_position().to_string();
         broadcast.turn = color_into_string(app_state.game.side_to_move());
         broadcast.player_color = player_color.to_string();
+
+        dbg!(app_state.players_waiting.len());
+        dbg!(app_state.white);
+        dbg!(app_state.black);
+        dbg!(player_id);
     }
 
     // send initial broadcast to new client
@@ -105,16 +113,25 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
     }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
+    let app_state_clone = app_state.clone();
 
     // broadcast messages to all connected clients
     tokio::spawn(async move {
         while let Ok(mut msg) = rx.recv().await {
+            let app_state = app_state_clone.lock().await;
+            if app_state.white == Some(player_id) {
+                player_color = "white";
+            }
+            if app_state.black == Some(player_id) {
+                player_color = "black";
+            }
             // after receiving a msg on the channel
             // serialize and send the msg to clients
             msg.player_color = player_color.to_string();
             if let Ok(json_msg) = serde_json::to_string(&msg) {
                 if let Err(err) = ws_tx.send(json_msg.into()).await {
                     dbg!(err);
+                    return;
                 }
             }
         }
@@ -125,10 +142,10 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
         match msg {
             Message::Text(bytes) => {
                 if let Ok(player_move) = serde_json::from_str::<PlayerMove>(&bytes) {
-                    println!("{:?}", player_move);
+                    // lock the app_state
+                    let mut app_state = app_state.lock().await;
 
                     // create new chess move
-                    let mut app_state = app_state.lock().await;
                     let source = square_from_str(&player_move.source);
                     let target = square_from_str(&player_move.target);
 
@@ -137,22 +154,84 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
                         && let Some(target) = target
                     {
                         let new_move = ChessMove::new(source, target, None);
-                        if app_state.game.make_move(new_move) {
-                            // if move is legal, broadcast move
-                            let msg = Broadcast {
-                                position: app_state.game.current_position().to_string(),
-                                turn: color_into_string(app_state.game.side_to_move()),
-                                player_color: player_color.into(),
-                            };
-                            if let Err(err) = app_state.sender.send(msg) {
-                                dbg!(err);
-                            }
+                        app_state.game.make_move(new_move);
+                    }
+
+                    let mut broadcast = Broadcast::default();
+                    broadcast.position = app_state.game.current_position().to_string();
+                    broadcast.turn = color_into_string(app_state.game.side_to_move());
+                    if let Some(result) = app_state.game.result() {
+                        broadcast.game_result = result_to_string(result);
+                    }
+                    if let Err(err) = app_state.sender.send(broadcast) {
+                        dbg!(err);
+                    }
+                } else if let Ok(player_resign) = serde_json::from_str::<PlayerResign>(&bytes) {
+                    let mut app_state = app_state.lock().await;
+                    if let Some(color) = string_into_color(&player_resign.player_color) {
+                        app_state.game.resign(color);
+
+                        let mut broadcast = Broadcast::default();
+                        broadcast.position = app_state.game.current_position().to_string();
+                        broadcast.turn = color_into_string(app_state.game.side_to_move());
+                        if let Some(result) = app_state.game.result() {
+                            broadcast.game_result = result_to_string(result);
+                        }
+                        if let Err(err) = app_state.sender.send(broadcast) {
+                            dbg!(err);
                         }
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    // if player disconnects, remove from game state
+    let mut app_state = app_state.lock().await;
+    if app_state.white == Some(player_id) {
+        app_state.white = app_state.players_waiting.pop_front();
+    } else if app_state.black == Some(player_id) {
+        app_state.black = app_state.players_waiting.pop_front();
+    } else if app_state.players_waiting.contains(&player_id) {
+        app_state.players_waiting.retain(|item| *item != player_id);
+    }
+
+    // send broadcast to so that clients are updated
+    let mut broadcast = Broadcast::default();
+    broadcast.position = app_state.game.current_position().to_string();
+    broadcast.turn = color_into_string(app_state.game.side_to_move());
+    if let Some(result) = app_state.game.result() {
+        broadcast.game_result = result_to_string(result);
+    }
+
+    if let Err(err) = app_state.sender.send(broadcast) {
+        dbg!(err);
+    }
+
+    dbg!(app_state.players_waiting.len());
+    dbg!(app_state.white);
+    dbg!(app_state.black);
+    dbg!(player_id);
+}
+
+fn result_to_string(result: GameResult) -> String {
+    match result {
+        GameResult::WhiteCheckmates => "White wins by checkmate".to_string(),
+        GameResult::WhiteResigns => "White resigns, black wins".to_string(),
+        GameResult::BlackCheckmates => "Black wins by checkmate".to_string(),
+        GameResult::BlackResigns => "Black resigns, white wins".to_string(),
+        GameResult::Stalemate => "Draw by stalemate".to_string(),
+        GameResult::DrawAccepted => "Draw by agreement".to_string(),
+        GameResult::DrawDeclared => "Draw declared".to_string(),
+    }
+}
+
+fn string_into_color(color: &str) -> Option<Color> {
+    match color {
+        "white" => Some(Color::White),
+        "black" => Some(Color::Black),
+        _ => None,
     }
 }
 
