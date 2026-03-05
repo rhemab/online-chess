@@ -2,7 +2,7 @@ const turn = document.getElementById("turn");
 const resign = document.getElementById("resign");
 const joinNewGame = document.getElementById("joinNewGame");
 
-const socketUrl = `ws://${window.location.host}/ws`;
+const socketUrl = `wss://${window.location.host}/ws`;
 const socket = new WebSocket(socketUrl);
 
 let game_state = {
