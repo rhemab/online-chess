@@ -148,11 +148,11 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
                     let target = square_from_str(&player_move.target);
 
                     // if we have a source and a target, make the move
-                    if let Some(source) = source
-                        && let Some(target) = target
-                    {
-                        let new_move = ChessMove::new(source, target, None);
-                        app_state.game.make_move(new_move);
+                    if let Some(source) = source {
+                        if let Some(target) = target {
+                            let new_move = ChessMove::new(source, target, None);
+                            app_state.game.make_move(new_move);
+                        }
                     }
 
                     let mut broadcast = Broadcast::default();
