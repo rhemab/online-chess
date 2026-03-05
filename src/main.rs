@@ -191,8 +191,10 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
     let mut app_state = app_state.lock().await;
     if app_state.white == Some(player_id) {
         app_state.white = app_state.players_waiting.pop_front();
+        app_state.game = Game::new();
     } else if app_state.black == Some(player_id) {
         app_state.black = app_state.players_waiting.pop_front();
+        app_state.game = Game::new();
     } else if app_state.players_waiting.contains(&player_id) {
         app_state.players_waiting.retain(|item| *item != player_id);
     }
@@ -204,7 +206,6 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<Mutex<AppState>>) {
     if let Some(result) = app_state.game.result() {
         broadcast.game_result = result_to_string(result);
     }
-
     if let Err(err) = app_state.sender.send(broadcast) {
         dbg!(err);
     }
